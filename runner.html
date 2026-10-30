@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTW Tracker - iPhone Sender (Edge 1)</title>
+    <!-- Library MQTT.js -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background: #f3f6fb; padding: 20px; }
+        .card { background: white; max-width: 400px; margin: 0 auto; padding: 20px; border-radius: 14px; box-shadow: 0 3px 12px rgba(0,0,0,0.1); }
+        button { background: #27ae60; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 8px; cursor: pointer; margin-top: 15px; width: 100%; }
+        button.stop { background: #e74c3c; }
+        .log { background: #1e293b; color: #38bdf8; padding: 10px; border-radius: 6px; text-align: left; font-family: monospace; font-size: 12px; height: 150px; overflow-y: auto; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>📱 iPhone Sensor Sender</h2>
+        <p id="connStatus" style="color: gray;">Status MQTT: Menghubungkan...</p>
+        
+        <button id="toggleBtn" onclick="toggleTracking()">Mulai Kirim Sensor</button>
+        
+        <div class="log" id="logBox">Log data akan muncul di sini...</div>
+    </div>
+
+    <script>
+        const UID = "kelompok_07"; // Harus sama persis dengan server laptop!
+        const TOPIC = `otwtracker/${UID}/telemetry`;
+        
+        let client = null;
+        let isTracking = false;
+        let watchId = null;
+        let lastAccel = { x: 0, y: 0, z: 9.81, rms: 0 };
+
+        const logBox = document.getElementById("logBox");
+        const connStatus = document.getElementById("connStatus");
+        const toggleBtn = document.getElementById("toggleBtn");
+
+        function log(text) {
+            logBox.innerHTML += `> ${text}<br>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // 1. Hubungkan ke MQTT Broker via WebSocket
+        function initMQTT() {
+            client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt", {
+                clientId: "iphone_sender_" + Math.random().toString(16).slice(2, 8)
+            });
+
+            client.on("connect", () => {
+                connStatus.style.color = "green";
+                connStatus.innerText = "Status MQTT: Terhubung ✅";
+                log("Berhasil terhubung ke broker MQTT.");
+            });
+
+            client.on("error", (err) => {
+                connStatus.style.color = "red";
+                connStatus.innerText = "Status MQTT: Gagal Koneksi ❌";
+                log("Error MQTT: " + err.message);
+            });
+        }
+
+        // 2. Tangkap Sensor Accelerometer dari HP
+        window.addEventListener("devicemotion", (event) => {
+            if (!isTracking) return;
+            let acc = event.accelerationIncludingGravity;
+            if (acc) {
+                let x = acc.x || 0;
+                let y = acc.y || 0;
+                let z = acc.z || 0;
+                // Hitung magnitudo dikurang gravitasi (9.81) untuk RMS sederhana
+                let mag = Math.sqrt(x*x + y*y + z*z);
+                let rms = Math.abs(mag - 9.81);
+                lastAccel = { x: x, y: y, z: z, rms: rms };
+            }
+        });
+
+        // 3. Mulai / Berhenti Tracking GPS & Sensor
+        function toggleTracking() {
+            if (!isTracking) {
+                // Khusus iOS 13+, butuh izin manual untuk akses motion sensor
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                    DeviceMotionEvent.requestPermission().then(response => {
+                        if (response === 'granted') {
+                            startGPSAndPublish();
+                        } else {
+                            alert("Izin sensor gerak ditolak!");
+                        }
+                    }).catch(console.error);
+                } else {
+                    startGPSAndPublish();
+                }
+            } else {
+                stopTracking();
+            }
+        }
+
+        function startGPSAndPublish() {
+            isTracking = true;
+            toggleBtn.textContent = "Berhenti Kirim";
+            toggleBtn.className = "stop";
+            log("Tracking dimulai...");
+
+            // Ambil data GPS secara berkala pakai Geolocation API browser
+            if ("geolocation" in navigator) {
+                watchId = navigator.geolocation.watchPosition((position) => {
+                    let lat = position.coords.latitude;
+                    let lon = position.coords.longitude;
+                    let accuracy = position.coords.accuracy;
+                    let speed = position.coords.speed || 0;
+
+                    // Bungkus payload agar sesuai dengan yang dibaca oleh edge2_server.py laptop
+                    let payload = {
+                        v: 1,
+                        device_id: "iphone-edge1",
+                        ts: Math.floor(Date.now() / 1000),
+                        gps: {
+                            lat: lat,
+                            lon: lon,
+                            acc_m: accuracy,
+                            speed_mps: speed,
+                            age_s: 0
+                        },
+                        accel: {
+                            rms: Number(lastAccel.rms.toFixed(3)),
+                            rms_smooth: Number(lastAccel.rms.toFixed(3)),
+                            peak: Number(lastAccel.rms.toFixed(3)),
+                            samples: 10,
+                            window_s: 2.0
+                        }
+                    };
+
+                    // Kirim ke MQTT Broker
+                    if (client && client.connected) {
+                        client.publish(TOPIC, JSON.stringify(payload), { qos: 0 });
+                        log(`Kirim GPS: ${lat.toFixed(5)}, ${lon.toFixed(5)} | RMS: ${lastAccel.rms.toFixed(2)}`);
+                    }
+                }, (error) => {
+                    log("Error GPS: " + error.message);
+                }, {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 10000
+                });
+            } else {
+                alert("Browser tidak mendukung GPS Geolocation.");
+            }
+        }
+
+        function stopTracking() {
+            isTracking = false;
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+            }
+            toggleBtn.textContent = "Mulai Kirim Sensor";
+            toggleBtn.className = "";
+            log("Tracking dihentikan.");
+        }
+
+        // Jalankan koneksi MQTT saat halaman dibuka
+        initMQTT();
+    </script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OTW Tracker | IoT Dashboard</title>
+
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f3f6fb;
+      color: #172033;
+    }
+
+    header {
+      padding: 24px;
+      color: white;
+      background: #183b68;
+    }
+
+    header h1 { margin: 0 0 8px; }
+    header p { margin: 0; opacity: 0.85; }
+
+    main {
+      max-width: 1000px;
+      margin: auto;
+      padding: 20px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 14px;
+      box-shadow: 0 3px 12px #10204010;
+    }
+
+    .label { color: #667085; font-size: 14px; }
+    .value { font-size: 26px; font-weight: bold; margin-top: 12px; }
+    .small { font-size: 13px; color: #667085; margin-top: 8px; }
+
+    #status {
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 20px;
+      background: #e8edf4;
+      color: #344054;
+      font-weight: bold;
+      font-size: 15px;
+    }
+
+    .true { background: #dcfce7 !important; color: #166534 !important; }
+    .fake { background: #fee2e2 !important; color: #991b1b !important; }
+    .unknown { background: #fef3c7 !important; color: #92400e !important; }
+
+    .alert {
+      border-left: 4px solid #d97706;
+      background: white;
+      padding: 14px;
+      margin-top: 10px;
+      border-radius: 6px;
+    }
+
+    footer {
+      color: #667085;
+      font-size: 12px;
+      padding: 20px 0;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>OTW Tracker</h1>
+    <p>IoT-based journey verification dashboard</p>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <div class="label">Status Perjalanan</div>
+        <div class="value">
+          <span id="status" class="unknown">UNCERTAIN</span>
+        </div>
+        <div class="small" id="connection">Menghubungkan ke broker...</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Jarak dari Titik Awal</div>
+        <div class="value"><span id="distance">--</span> m</div>
+      </div>
+
+      <div class="card">
+        <div class="label">RMS Acceleration</div>
+        <div class="value"><span id="motion">--</span></div>
+        <div class="small">m/s² — periksa metode RMS pada server</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Akurasi GPS</div>
+        <div class="value"><span id="accuracy">--</span> m</div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top: 16px">
+      <h3>Informasi Validasi</h3>
+      <p id="reason">Belum ada data telemetri.</p>
+      <p class="small">Pembaruan terakhir: <span id="updated">--</span></p>
+    </section>
+
+    <section class="card" style="margin-top: 16px">
+      <h3>Alert Terbaru</h3>
+      <div id="alerts">Belum ada alert.</div>
+    </section>
+
+    <footer>
+      Prototipe akademik. Status merupakan indikasi berdasarkan data sensor,
+      bukan bukti mutlak bahwa pengguna berbohong.
+    </footer>
+  </main>
+
+  <script>
+    const DEVICE_ID = "kelompok_07";
+    const BASE = `otwtracker/${DEVICE_ID}`;
+
+    const STATUS_TOPIC = `${BASE}/status`;
+    const ALERT_TOPIC = `${BASE}/alert`;
+
+    const BROKER_URL = "wss://broker.hivemq.com:8884/mqtt";
+    const statusEl = document.getElementById("status");
+    const connectionEl = document.getElementById("connection");
+
+    function setStatus(status) {
+      statusEl.textContent = status;
+
+      statusEl.className = "";
+      if (status === "TRUE_OTW" || status === "PENDING") {
+        statusEl.classList.add("true");
+      } else if (status === "FAKE_OTW") {
+        statusEl.classList.add("fake");
+      } else {
+        statusEl.classList.add("unknown");
+      }
+    }
+
+    function safeNumber(value, digits = 2) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number.toFixed(digits) : "--";
+    }
+
+    function showStatus(data) {
+      // Sesuaikan dengan key JSON dari edge2_server.py (menggunakan 'state', 'dist_m', 'rms')
+      setStatus(data.state || "UNCERTAIN");
+
+      document.getElementById("distance").textContent =
+        safeNumber(data.dist_m);
+
+      document.getElementById("motion").textContent =
+        safeNumber(data.rms, 3);
+
+      document.getElementById("accuracy").textContent =
+        safeNumber(data.gps_accuracy_m);
+
+      document.getElementById("reason").textContent =
+        data.reason || "Tidak ada keterangan.";
+
+      document.getElementById("updated").textContent =
+        data.ts ? new Date(data.ts * 1000).toLocaleString("id-ID") : new Date().toLocaleString("id-ID");
+    }
+
+    function showAlert(data) {
+      const box = document.createElement("div");
+      box.className = "alert";
+
+      const title = document.createElement("strong");
+      title.textContent = data.type || "ALERT";
+
+      const message = document.createElement("p");
+      message.textContent = data.message || "Ada pembaruan status.";
+
+      const time = document.createElement("small");
+      time.textContent = data.ts ? new Date(data.ts * 1000).toLocaleTimeString("id-ID") : new Date().toLocaleTimeString();
+
+      box.append(title, message, time);
+
+      const container = document.getElementById("alerts");
+      if (container.textContent === "Belum ada alert.") {
+        container.replaceChildren();
+      }
+
+      container.prepend(box);
+
+      while (container.children.length > 5) {
+        container.lastElementChild.remove();
+      }
+    }
+
+    const client = mqtt.connect(BROKER_URL, {
+      clientId: "otw-dashboard-" +
+        Math.random().toString(16).slice(2, 10),
+      clean: true,
+      connectTimeout: 10000,
+      reconnectPeriod: 3000
+    });
+
+    client.on("connect", () => {
+      connectionEl.textContent = "Terhubung ke MQTT broker";
+
+      client.subscribe([STATUS_TOPIC, ALERT_TOPIC], { qos: 0 },
+        (error) => {
+          if (error) {
+            connectionEl.textContent =
+              "Gagal berlangganan topic.";
+          }
+        }
+      );
+    });
+
+    client.on("reconnect", () => {
+      connectionEl.textContent = "Mencoba menghubungkan ulang...";
+    });
+
+    client.on("error", (error) => {
+      connectionEl.textContent = "Koneksi MQTT bermasalah.";
+      console.error("MQTT error:", error.message);
+    });
+
+    client.on("message", (topic, payload) => {
+      try {
+        const data = JSON.parse(payload.toString());
+
+        if (topic === STATUS_TOPIC) {
+          showStatus(data);
+        } else if (topic === ALERT_TOPIC) {
+          showAlert(data);
+        }
+      } catch (error) {
+        console.error("Payload JSON tidak valid:", error);
+      }
+    });
+  </script>
+</body>
+</html>
